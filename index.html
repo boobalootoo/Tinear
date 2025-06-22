@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Mic to Headphones with Noise Options</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+
+        h1 {
+            color: #0056b3;
+        }
+
+        .controls {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s ease;
+        }
+
+        #startBtn {
+            background-color: #28a745;
+            color: white;
+        }
+
+        #startBtn:hover:not([disabled]) {
+            background-color: #218838;
+        }
+
+        #stopBtn {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        #stopBtn:hover:not([disabled]) {
+            background-color: #c82333;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        .options {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background-color: #fff;
+            display: inline-block; /* To make it wrap content */
+        }
+
+        .options label {
+            display: block; /* Each label on a new line */
+            margin-bottom: 10px;
+            text-align: left;
+        }
+
+        .options input[type="checkbox"] {
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Live Microphone Passthrough</h1>
+    <p>This site attempts to send your live microphone feed directly to your headphones. Expect some latency.</p>
+
+    <div class="controls">
+        <button id="startBtn">Start Mic Passthrough</button>
+        <button id="stopBtn" disabled>Stop Mic Passthrough</button>
+
+        <div class="options">
+            <label>
+                <input type="checkbox" id="enableNoiseSuppression" disabled>
+                Browser Noise Suppression (WebRTC)
+            </label>
+            <br>
+            <label>
+                <input type="checkbox" id="applyHighPassFilter" disabled>
+                Apply High-Pass Filter (for hum/rumble)
+            </label>
+        </div>
+    </div>
+
+    <script>
+        let audioContext;
+        let micStream;
+        let sourceNode;
+        let filterNode; // New: for basic filtering
+
+        const startButton = document.getElementById('startBtn');
+        const stopButton = document.getElementById('stopBtn');
+        const enableNoiseSuppressionCheckbox = document.getElementById('enableNoiseSuppression');
+        const applyHighPassFilterCheckbox = document.getElementById('applyHighPassFilter');
+
+        // Event listeners
+        startButton.addEventListener('click', startMicPassthrough);
+        stopButton.addEventListener('click', stopMicPassthrough);
+        enableNoiseSuppressionCheckbox.addEventListener('change', updateAudioProcessing);
+        applyHighPassFilterCheckbox.addEventListener('change', updateAudioProcessing);
+
+        // Function to start microphone passthrough
+        async function startMicPassthrough() {
+            try {
+                // Request microphone access with WebRTC noise suppression and auto-gain control
+                // These are browser-level features, not part of Web Audio API nodes.
+                const constraints = {
+                    audio: {
+                        noiseSuppression: enableNoiseSuppressionCheckbox.checked,
+                        echoCancellation: false, // Generally not needed for passthrough unless there's feedback
+                        autoGainControl: true // Helps normalize input volume
+                    }
+                };
+                micStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+                // Create an AudioContext
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                // Create a MediaStreamSource from the microphone stream
+                sourceNode = audioContext.createMediaStreamSource(micStream);
+
+                // Connect the source initially to the destination
+                sourceNode.connect(audioContext.destination);
+
+                // Apply additional processing if checkboxes are checked
+                updateAudioProcessing();
+
+                console.log('Microphone passthrough started.');
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                enableNoiseSuppressionCheckbox.disabled = false;
+                applyHighPassFilterCheckbox.disabled = false;
+
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                alert('Could not access microphone. Please ensure you have granted permission.\n' + err.message);
+                startButton.disabled = false; // Re-enable if there was an error
+                enableNoiseSuppressionCheckbox.disabled = true;
+                applyHighPassFilterCheckbox.disabled = true;
+            }
+        }
+
+        // Function to update audio processing chain based on checkbox states
+        function updateAudioProcessing() {
+            if (!audioContext || !sourceNode) return;
+
+            // Disconnect existing connections to rebuild the chain
+            sourceNode.disconnect();
+            if (filterNode) {
+                filterNode.disconnect();
+                filterNode = null;
+            }
+
+            let currentNode = sourceNode;
+
+            // Apply High-Pass Filter if checked
+            if (applyHighPassFilterCheckbox.checked) {
+                filterNode = audioContext.createBiquadFilter();
+                filterNode.type = 'highpass';
+                filterNode.frequency.value = 80; // Adjust as needed (e.g., 80 Hz for voice)
+                filterNode.Q.value = 1; // Quality factor
+                currentNode.connect(filterNode);
+                currentNode = filterNode;
+                console.log('High-pass filter enabled.');
+            } else {
+                console.log('High-pass filter disabled.');
+            }
+
+            // Connect the final node in the chain to the audio destination
+            currentNode.connect(audioContext.destination);
+        }
+
+        // Function to stop microphone passthrough
+        function stopMicPassthrough() {
+            if (micStream) {
+                micStream.getTracks().forEach(track => track.stop()); // Stop all tracks in the stream
+                micStream = null;
+            }
+            if (sourceNode) {
+                sourceNode.disconnect(); // Disconnect the audio node
+                sourceNode = null;
+            }
+            if (filterNode) {
+                filterNode.disconnect();
+                filterNode = null;
+            }
+            if (audioContext) {
+                audioContext.close(); // Close the AudioContext to release resources
+                audioContext = null;
+            }
+
+            console.log('Microphone passthrough stopped.');
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            enableNoiseSuppressionCheckbox.disabled = true;
+            applyHighPassFilterCheckbox.disabled = true;
+        }
+    </script>
+</body>
+</html>
