@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Mic Visualizer + Filters + Overlays</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #111;
+      color: #fff;
+      text-align: center;
+      padding: 2em;
+      margin: 0;
+    }
+    canvas {
+      width: 100%;
+      height: 200px;
+      background: #222;
+      border: 1px solid #555;
+      margin-bottom: 1em;
+    }
+    button, input[type=range] {
+      margin: 0.5em;
+    }
+    .controls {
+      margin: 1em 0;
+    }
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 1em;
+    }
+    .slider-group label {
+      margin-bottom: 0.2em;
+    }
+  </style>
+</head>
+<body>
+  <h1>Mic Visualizer + Filters + Frequency Overlay</h1>
+
+  <canvas id="waveform" width="800" height="200"></canvas>
+  <canvas id="spectrogram" width="800" height="200" style="display:none;"></canvas>
+  <canvas id="volume" width="800" height="40"></canvas>
+
+  <div class="controls">
+    <button id="start">Start Mic</button>
+    <button onclick="setView('waveform')">Waveform</button>
+    <button onclick="setView('spectrogram')">Spectrogram</button>
+    <button onclick="applyPreset('voice')">Voice Only</button>
+    <button onclick="applyPreset('flat')">Flat (No Filter)</button>
+    <button onclick="toggleOverlay()">Toggle Overlay</button>
+  </div>
+
+  <div class="slider-group">
+    <label>Low-pass cutoff: <span id="lowLabel">5000</span> Hz</label>
+    <input type="range" id="lowSlider" min="100" max="10000" value="5000">
+
+    <label>High-pass cutoff: <span id="highLabel">100</span> Hz</label>
+    <input type="range" id="highSlider" min="20" max="2000" value="100">
+
+    <label>Band-pass center: <span id="bandLabel">1700</span> Hz</label>
+    <input type="range" id="bandSlider" min="300" max="5000" value="1700">
+
+    <label>Band-pass Q: <span id="qLabel">1.5</span></label>
+    <input type="range" id="qSlider" min="0.1" max="10" step="0.1" value="1.5">
+  </div>
+
+  <p id="status">Waiting to start...</p>
+
+  <script>
+    const waveformCanvas = document.getElementById('waveform');
+    const spectrogramCanvas = document.getElementById('spectrogram');
+    const volumeCanvas = document.getElementById('volume');
+    const wfCtx = waveformCanvas.getContext('2d');
+    const spCtx = spectrogramCanvas.getContext('2d');
+    const volCtx = volumeCanvas.getContext('2d');
+
+    const lowSlider = document.getElementById('lowSlider');
+    const highSlider = document.getElementById('highSlider');
+    const bandSlider = document.getElementById('bandSlider');
+    const qSlider = document.getElementById('qSlider');
+
+    const lowLabel = document.getElementById('lowLabel');
+    const highLabel = document.getElementById('highLabel');
+    const bandLabel = document.getElementById('bandLabel');
+    const qLabel = document.getElementById('qLabel');
+
+    let analyser, dataArray, freqArray, audioCtx;
+    let spectrogramX = 0;
+    let source, lowpass, highpass, bandpass;
+    let showOverlay = true;
+
+    document.getElementById('start').onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        source = audioCtx.createMediaStreamSource(stream);
+
+        // Filters
+        highpass = audioCtx.createBiquadFilter();
+        highpass.type = 'highpass';
+        highpass.frequency.value = highSlider.value;
+
+        lowpass = audioCtx.createBiquadFilter();
+        lowpass.type = 'lowpass';
+        lowpass.frequency.value = lowSlider.value;
+
+        bandpass = audioCtx.createBiquadFilter();
+        bandpass.type = 'bandpass';
+        bandpass.frequency.value = bandSlider.value;
+        bandpass.Q.value = qSlider.value;
+
+        // Analyzer
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        dataArray = new Uint8Array(analyser.fftSize);
+        freqArray = new Uint8Array(analyser.frequencyBinCount);
+
+        // Routing
+        source.connect(highpass);
+        highpass.connect(lowpass);
+        lowpass.connect(bandpass);
+        bandpass.connect(analyser);
+        bandpass.connect(audioCtx.destination);
+
+        draw();
+        document.getElementById('status').textContent = "Mic live and visualizing.";
+      } catch (err) {
+        document.getElementById('status').textContent = "Error: " + err.message;
+      }
+    };
+
+    function draw() {
+      requestAnimationFrame(draw);
+      analyser.getByteTimeDomainData(dataArray);
+      analyser.getByteFrequencyData(freqArray);
+
+      // Waveform
+      wfCtx.fillStyle = "#222";
+      wfCtx.fillRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+      wfCtx.lineWidth = 2;
+      wfCtx.strokeStyle = "#00ff88";
+      wfCtx.beginPath();
+      const sliceWidth = waveformCanvas.width / dataArray.length;
+      let x = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const v = dataArray[i] / 128.0;
+        const y = (v * waveformCanvas.height) / 2;
+        i === 0 ? wfCtx.moveTo(x, y) : wfCtx.lineTo(x, y);
+        x += sliceWidth;
+      }
+      wfCtx.lineTo(waveformCanvas.width, waveformCanvas.height / 2);
+      wfCtx.stroke();
+      if (showOverlay) drawOverlay(wfCtx, waveformCanvas);
+
+      // Spectrogram
+      const height = spectrogramCanvas.height;
+      const width = spectrogramCanvas.width;
+      const bins = freqArray.length;
+      const column = spCtx.createImageData(1, height);
+      for (let y = 0; y < height; y++) {
+        const freqIndex = Math.floor((bins * y) / height);
+        const value = freqArray[freqIndex];
+        const r = value;
+        const g = value / 2;
+        const b = 255 - value;
+        const i = (height - y - 1) * 4;
+        column.data[i] = r;
+        column.data[i + 1] = g;
+        column.data[i + 2] = b;
+        column.data[i + 3] = 255;
+      }
+      spCtx.putImageData(column, spectrogramX, 0);
+      spectrogramX = (spectrogramX + 1) % width;
+      if (spectrogramX === 0) spCtx.clearRect(0, 0, width, height);
+      if (showOverlay) drawOverlay(spCtx, spectrogramCanvas);
+
+      // Volume
+      const sumSquares = dataArray.reduce((sum, val) => sum + (val - 128) ** 2, 0);
+      const rms = Math.sqrt(sumSquares / dataArray.length);
+      const volume = rms * 2;
+      volCtx.fillStyle = "#222";
+      volCtx.fillRect(0, 0, volumeCanvas.width, volumeCanvas.height);
+      volCtx.fillStyle = "#00ccff";
+      volCtx.fillRect(0, 0, volume, volumeCanvas.height);
+    }
+
+    function drawOverlay(ctx, canvas) {
+      const regions = [
+        { label: "Bass", min: 20, max: 250, color: "#333" },
+        { label: "Voice", min: 300, max: 3000, color: "#224" },
+        { label: "Treble", min: 4000, max: 8000, color: "#441" },
+        { label: "Sibilance", min: 5000, max: 8000, color: "#444" },
+      ];
+      const width = canvas.width;
+      const height = canvas.height;
+      const maxHz = 10000;
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "right";
+
+      for (let r of regions) {
+        const y1 = height - (r.min / maxHz) * height;
+        const y2 = height - (r.max / maxHz) * height;
+        ctx.fillStyle = r.color;
+        ctx.fillRect(0, y2, width, y1 - y2);
+        ctx.fillStyle = "#ccc";
+        ctx.fillText(r.label, width - 5, (y1 + y2) / 2);
+      }
+    }
+
+    function setView(view) {
+      waveformCanvas.style.display = view === 'waveform' ? 'block' : 'none';
+      spectrogramCanvas.style.display = view === 'spectrogram' ? 'block' : 'none';
+    }
+
+    function toggleOverlay() {
+      showOverlay = !showOverlay;
+    }
+
+    function applyPreset(name) {
+      if (!lowpass || !highpass || !bandpass) return;
+      if (name === 'voice') {
+        highpass.frequency.value = 300;
+        lowpass.frequency.value = 3000;
+        bandpass.frequency.value = 1700;
+        bandpass.Q.value = 2;
+      } else if (name === 'flat') {
+        highpass.frequency.value = 20;
+        lowpass.frequency.value = 20000;
+        bandpass.frequency.value = 1000;
+        bandpass.Q.value = 1;
+      }
+      updateLabels();
+    }
+
+    function updateLabels() {
+      lowLabel.textContent = lowSlider.value;
+      highLabel.textContent = highSlider.value;
+      bandLabel.textContent = bandSlider.value;
+      qLabel.textContent = qSlider.value;
+      if (lowpass) lowpass.frequency.value = lowSlider.value;
+      if (highpass) highpass.frequency.value = highSlider.value;
+      if (bandpass) {
+        bandpass.frequency.value = bandSlider.value;
+        bandpass.Q.value = qSlider.value;
+      }
+    }
+
+    lowSlider.oninput = updateLabels;
+    highSlider.oninput = updateLabels;
+    bandSlider.oninput = updateLabels;
+    qSlider.oninput = updateLabels;
+  </script>
+</body>
+</html>
