@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Mic Visualizer</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      background: #111;
+      color: #fff;
+      margin: 0;
+      padding: 2em;
+    }
+    canvas {
+      width: 100%;
+      height: 200px;
+      background: #222;
+      border: 1px solid #555;
+      margin-bottom: 1em;
+    }
+    button {
+      font-size: 1em;
+      padding: 0.5em 1em;
+      margin: 0.25em;
+    }
+  </style>
+</head>
+<body>
+  <h1>Mic Visualizer</h1>
+
+  <canvas id="waveform" width="800" height="200"></canvas>
+  <canvas id="spectrogram" width="800" height="200" style="display:none;"></canvas>
+  <canvas id="volume" width="800" height="40"></canvas>
+
+  <div>
+    <button id="start">Start Mic</button>
+    <button onclick="setView('waveform')">Waveform</button>
+    <button onclick="setView('spectrogram')">Spectrogram</button>
+  </div>
+  <p id="status"></p>
+
+  <script>
+    const status = document.getElementById('status');
+    const waveformCanvas = document.getElementById('waveform');
+    const spectrogramCanvas = document.getElementById('spectrogram');
+    const volumeCanvas = document.getElementById('volume');
+    const wfCtx = waveformCanvas.getContext('2d');
+    const spCtx = spectrogramCanvas.getContext('2d');
+    const volCtx = volumeCanvas.getContext('2d');
+
+    let analyser, dataArray, freqArray;
+    let spectrogramX = 0;
+
+    document.getElementById('start').onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(stream);
+
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+
+        dataArray = new Uint8Array(analyser.fftSize);
+        freqArray = new Uint8Array(analyser.frequencyBinCount);
+
+        source.connect(analyser);
+        source.connect(audioCtx.destination);
+
+        draw();
+        status.textContent = "Mic live and visualizing.";
+      } catch (err) {
+        status.textContent = "Error: " + err.message;
+      }
+    };
+
+    function setView(view) {
+      waveformCanvas.style.display = (view === 'waveform') ? 'block' : 'none';
+      spectrogramCanvas.style.display = (view === 'spectrogram') ? 'block' : 'none';
+    }
+
+    function draw() {
+      requestAnimationFrame(draw);
+
+      analyser.getByteTimeDomainData(dataArray);
+      analyser.getByteFrequencyData(freqArray);
+
+      // Draw waveform
+      wfCtx.fillStyle = "#222";
+      wfCtx.fillRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+      wfCtx.lineWidth = 2;
+      wfCtx.strokeStyle = "#00ff88";
+      wfCtx.beginPath();
+      const sliceWidth = waveformCanvas.width / dataArray.length;
+      let x = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const v = dataArray[i] / 128.0;
+        const y = (v * waveformCanvas.height) / 2;
+        i === 0 ? wfCtx.moveTo(x, y) : wfCtx.lineTo(x, y);
+        x += sliceWidth;
+      }
+      wfCtx.lineTo(waveformCanvas.width, waveformCanvas.height / 2);
+      wfCtx.stroke();
+
+      // Draw spectrogram
+      const height = spectrogramCanvas.height;
+      const width = spectrogramCanvas.width;
+      const bins = freqArray.length;
+
+      const column = spCtx.createImageData(1, height);
+      for (let y = 0; y < height; y++) {
+        const freqIndex = Math.floor((bins * y) / height);
+        const value = freqArray[freqIndex];
+        const r = value;
+        const g = value / 2;
+        const b = 255 - value;
+        const i = (height - y - 1) * 4;
+        column.data[i] = r;
+        column.data[i + 1] = g;
+        column.data[i + 2] = b;
+        column.data[i + 3] = 255;
+      }
+
+      spCtx.putImageData(column, spectrogramX, 0);
+      spectrogramX = (spectrogramX + 1) % width;
+      if (spectrogramX === 0) spCtx.clearRect(0, 0, width, height);
+
+      // Draw volume bar
+      const sumSquares = dataArray.reduce((sum, val) => sum + (val - 128) ** 2, 0);
+      const rms = Math.sqrt(sumSquares / dataArray.length);
+      const volume = rms * 2;
+
+      volCtx.fillStyle = "#222";
+      volCtx.fillRect(0, 0, volumeCanvas.width, volumeCanvas.height);
+      volCtx.fillStyle = "#00ccff";
+      volCtx.fillRect(0, 0, volume, volumeCanvas.height);
+    }
+  </script>
+</body>
+</html>
