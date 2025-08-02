@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Recorder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #ffffff;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md mx-auto space-y-6">
+        <h1 class="text-3xl font-bold text-center text-teal-400">Audio Recorder</h1>
+        <p class="text-center text-gray-400">Record, simulate noise removal, and play your audio.</p>
+
+        <div class="space-y-4">
+            <button id="record-button" class="w-full py-3 px-6 rounded-xl text-lg font-bold transition-all duration-300 transform hover:scale-105 shadow-lg bg-red-600 text-white hover:bg-red-700 focus:outline-none focus:ring-4 focus:ring-red-500/50">
+                Start Recording
+            </button>
+
+            <button id="process-button" disabled class="w-full py-3 px-6 rounded-xl text-lg font-bold transition-all duration-300 transform hover:scale-105 shadow-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-4 focus:ring-blue-500/50">
+                Remove Noise
+            </button>
+
+            <div id="audio-controls-container" class="hidden">
+                <audio id="audio-player" class="w-full rounded-xl" controls></audio>
+            </div>
+        </div>
+
+        <div id="message-box" class="p-4 bg-gray-700 rounded-lg text-center text-gray-300 min-h-[4rem] flex items-center justify-center">
+            Click "Start Recording" to begin.
+        </div>
+
+        <div id="loading-spinner" class="hidden flex items-center justify-center py-4">
+            <div class="spinner"></div>
+        </div>
+
+        <div id="recording-log" class="space-y-2 max-h-48 overflow-y-auto p-2 bg-gray-700 rounded-lg">
+            <h2 class="font-semibold text-gray-300">Recording History</h2>
+        </div>
+        <p class="text-xs text-gray-500 text-center mt-4">Your User ID: <span id="user-id" class="font-mono">Loading...</span></p>
+
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- Firebase Configuration and Initialization ---
+        // These global variables are provided by the Canvas environment.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId;
+
+        // Initialize Firebase on window load
+        window.onload = async () => {
+            try {
+                if (Object.keys(firebaseConfig).length > 0) {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            document.getElementById('user-id').textContent = userId;
+                            console.log("Firebase signed in. User ID:", userId);
+                            listenForRecordings();
+                        } else {
+                            console.log("Firebase sign in failed.");
+                            document.getElementById('user-id').textContent = 'Error';
+                        }
+                    });
+                } else {
+                    document.getElementById('message-box').textContent = "Firebase is not configured. Recording log will not be available.";
+                    document.getElementById('user-id').textContent = 'No Firebase';
+                }
+            } catch (e) {
+                console.error("Error initializing Firebase: ", e);
+                document.getElementById('message-box').textContent = "Error initializing Firebase. See console for details.";
+                document.getElementById('user-id').textContent = 'Error';
+            }
+        };
+
+        // --- UI Elements ---
+        const recordButton = document.getElementById('record-button');
+        const processButton = document.getElementById('process-button');
+        const audioPlayer = document.getElementById('audio-player');
+        const messageBox = document.getElementById('message-box');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const audioControlsContainer = document.getElementById('audio-controls-container');
+        const recordingLog = document.getElementById('recording-log');
+
+        // --- State Variables ---
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        // --- Functions to update UI state ---
+        const showMessage = (text) => {
+            messageBox.textContent = text;
+        };
+
+        const showLoading = (show) => {
+            loadingSpinner.classList.toggle('hidden', !show);
+        };
+
+        const toggleRecordingUI = (isRecordingState) => {
+            if (isRecordingState) {
+                recordButton.textContent = "Stop Recording";
+                recordButton.classList.add('bg-gray-500', 'hover:bg-gray-600', 'text-gray-200');
+                recordButton.classList.remove('bg-red-600', 'hover:bg-red-700', 'text-white');
+                processButton.disabled = true;
+                audioControlsContainer.classList.add('hidden');
+                showMessage("Recording...");
+            } else {
+                recordButton.textContent = "Start Recording";
+                recordButton.classList.add('bg-red-600', 'hover:bg-red-700', 'text-white');
+                recordButton.classList.remove('bg-gray-500', 'hover:bg-gray-600', 'text-gray-200');
+            }
+        };
+
+        // --- Audio Recording Logic ---
+        recordButton.addEventListener('click', async () => {
+            if (!isRecording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+                    
+                    mediaRecorder.addEventListener('dataavailable', event => {
+                        audioChunks.push(event.data);
+                    });
+
+                    mediaRecorder.addEventListener('stop', () => {
+                        isRecording = false;
+                        toggleRecordingUI(isRecording);
+                        processButton.disabled = false;
+                        showMessage("Recording stopped. Click 'Remove Noise' to process.");
+                    });
+
+                    mediaRecorder.start();
+                    isRecording = true;
+                    toggleRecordingUI(isRecording);
+                } catch (err) {
+                    console.error("Error accessing microphone:", err);
+                    showMessage("Error: Could not access microphone. Please check permissions.");
+                }
+            } else {
+                mediaRecorder.stop();
+            }
+        });
+
+        // --- Simulated Noise Removal & Playback Logic ---
+        processButton.addEventListener('click', () => {
+            processButton.disabled = true;
+            showMessage("Processing audio to remove noise...");
+            showLoading(true);
+
+            // Simulate a processing delay of 2 seconds
+            setTimeout(async () => {
+                showLoading(false);
+                showMessage("Processing complete! Playing original recording.");
+
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                audioPlayer.src = audioUrl;
+                
+                audioControlsContainer.classList.remove('hidden');
+
+                // Simulate saving a record to Firestore
+                try {
+                    const recordingsCollection = collection(db, 'artifacts', appId, 'users', userId, 'recordings');
+                    await addDoc(recordingsCollection, {
+                        timestamp: new Date(),
+                        size: audioBlob.size,
+                        mimeType: audioBlob.type,
+                        userId: userId
+                    });
+                } catch (e) {
+                    console.error("Error saving recording metadata to Firestore:", e);
+                }
+
+            }, 2000);
+        });
+
+        // --- Firestore Real-time Listener for Recordings ---
+        const listenForRecordings = () => {
+            if (!db || !userId) return;
+
+            const recordingsCollection = collection(db, 'artifacts', appId, 'users', userId, 'recordings');
+            // We'll use JS to sort the results instead of orderBy() to avoid index issues.
+            onSnapshot(recordingsCollection, (snapshot) => {
+                const recordings = [];
+                snapshot.forEach(doc => {
+                    recordings.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Sort recordings by timestamp in descending order
+                recordings.sort((a, b) => b.timestamp.toDate() - a.timestamp.toDate());
+
+                // Clear existing log
+                while (recordingLog.children.length > 1) {
+                    recordingLog.removeChild(recordingLog.lastChild);
+                }
+
+                // Populate log with new recordings
+                if (recordings.length > 0) {
+                    recordings.forEach(rec => {
+                        const recDate = rec.timestamp.toDate().toLocaleString();
+                        const logItem = document.createElement('p');
+                        logItem.className = 'text-sm text-gray-400';
+                        logItem.textContent = `Recording from: ${recDate}`;
+                        recordingLog.appendChild(logItem);
+                    });
+                } else {
+                    const noRecs = document.createElement('p');
+                    noRecs.className = 'text-sm text-gray-500 italic';
+                    noRecs.textContent = 'No recordings yet.';
+                    recordingLog.appendChild(noRecs);
+                }
+            });
+        };
+
+    </script>
+</body>
+</html>
+
