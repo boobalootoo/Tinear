@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Audio Streamer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #ffffff;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md mx-auto space-y-6">
+        <h1 class="text-3xl font-bold text-center text-teal-400">Live Audio Streamer</h1>
+        <p class="text-center text-gray-400">Transmit or receive real-time audio using a shared Stream ID.</p>
+
+        <div class="space-y-4">
+            <div>
+                <label for="stream-id" class="block text-sm font-medium text-gray-400">Stream ID:</label>
+                <input type="text" id="stream-id" placeholder="Enter a unique ID" class="mt-1 block w-full p-3 rounded-lg bg-gray-700 text-gray-100 border-gray-600 focus:ring-teal-400 focus:border-teal-400">
+            </div>
+
+            <div class="flex flex-col space-y-4">
+                <button id="transmit-button" class="w-full py-3 px-6 rounded-xl text-lg font-bold transition-all duration-300 transform hover:scale-105 shadow-lg bg-red-600 text-white hover:bg-red-700 focus:outline-none focus:ring-4 focus:ring-red-500/50">
+                    Start Transmitter
+                </button>
+                <button id="receive-button" class="w-full py-3 px-6 rounded-xl text-lg font-bold transition-all duration-300 transform hover:scale-105 shadow-lg bg-blue-600 text-white hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-500/50">
+                    Start Receiver
+                </button>
+            </div>
+        </div>
+
+        <div id="message-box" class="p-4 bg-gray-700 rounded-lg text-center text-gray-300 min-h-[4rem] flex items-center justify-center">
+            Enter a Stream ID and choose a mode.
+        </div>
+
+        <div id="loading-spinner" class="hidden flex items-center justify-center py-4">
+            <div class="spinner"></div>
+        </div>
+
+        <p class="text-xs text-gray-500 text-center mt-4">Your User ID: <span id="user-id" class="font-mono">Loading...</span></p>
+
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- Firebase Configuration and Initialization ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId;
+
+        window.onload = async () => {
+            try {
+                if (Object.keys(firebaseConfig).length > 0) {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            document.getElementById('user-id').textContent = userId;
+                            console.log("Firebase signed in. User ID:", userId);
+                        } else {
+                            console.log("Firebase sign in failed.");
+                            document.getElementById('user-id').textContent = 'Error';
+                        }
+                    });
+                } else {
+                    document.getElementById('message-box').textContent = "Firebase is not configured. Real-time streaming will not be available.";
+                    document.getElementById('user-id').textContent = 'No Firebase';
+                }
+            } catch (e) {
+                console.error("Error initializing Firebase: ", e);
+                document.getElementById('message-box').textContent = "Error initializing Firebase. See console for details.";
+                document.getElementById('user-id').textContent = 'Error';
+            }
+        };
+
+        // --- UI Elements ---
+        const streamIdInput = document.getElementById('stream-id');
+        const transmitButton = document.getElementById('transmit-button');
+        const receiveButton = document.getElementById('receive-button');
+        const messageBox = document.getElementById('message-box');
+        const loadingSpinner = document.getElementById('loading-spinner');
+
+        // --- State Variables ---
+        let mediaRecorder;
+        let isStreaming = false;
+        let audioContext;
+        let audioQueue = [];
+        let nextStartTime = 0;
+
+        // --- Utility Functions ---
+        const showMessage = (text) => {
+            messageBox.textContent = text;
+        };
+
+        const showLoading = (show) => {
+            loadingSpinner.classList.toggle('hidden', !show);
+        };
+
+        const toggleButtonState = (button, isActive, activeText, inactiveText, activeClasses, inactiveClasses) => {
+            button.disabled = false;
+            if (isActive) {
+                button.textContent = activeText;
+                button.classList.add(...activeClasses);
+                button.classList.remove(...inactiveClasses);
+            } else {
+                button.textContent = inactiveText;
+                button.classList.add(...inactiveClasses);
+                button.classList.remove(...activeClasses);
+            }
+        };
+
+        // --- Transmitter Logic ---
+        transmitButton.addEventListener('click', async () => {
+            if (!db || !userId) {
+                showMessage("Firebase is not ready. Please wait.");
+                return;
+            }
+
+            const streamId = streamIdInput.value.trim();
+            if (!streamId) {
+                showMessage("Please enter a Stream ID.");
+                return;
+            }
+
+            if (!isStreaming) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                    
+                    mediaRecorder.addEventListener('dataavailable', async (event) => {
+                        if (event.data.size > 0) {
+                            // Convert blob to base64 string
+                            const reader = new FileReader();
+                            reader.readAsDataURL(event.data);
+                            reader.onloadend = async () => {
+                                const base64data = reader.result;
+                                try {
+                                    const streamDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'audio-streams', streamId);
+                                    await setDoc(streamDocRef, {
+                                        data: base64data,
+                                        timestamp: new Date(),
+                                        sender: userId
+                                    });
+                                } catch (e) {
+                                    console.error("Error writing to Firestore:", e);
+                                }
+                            };
+                        }
+                    });
+
+                    mediaRecorder.start(500); // Record in 500ms chunks
+                    isStreaming = true;
+                    toggleButtonState(transmitButton, true, "Stop Transmitter", "Start Transmitter", ['bg-gray-500', 'hover:bg-gray-600', 'text-gray-200'], ['bg-red-600', 'hover:bg-red-700', 'text-white']);
+                    receiveButton.disabled = true;
+                    streamIdInput.disabled = true;
+                    showMessage(`Transmitting on Stream ID: ${streamId}`);
+                } catch (err) {
+                    console.error("Error accessing microphone:", err);
+                    showMessage("Error: Could not access microphone. Please check permissions.");
+                }
+            } else {
+                mediaRecorder.stop();
+                isStreaming = false;
+                toggleButtonState(transmitButton, false, "Stop Transmitter", "Start Transmitter", ['bg-gray-500', 'hover:bg-gray-600', 'text-gray-200'], ['bg-red-600', 'hover:bg-red-700', 'text-white']);
+                receiveButton.disabled = false;
+                streamIdInput.disabled = false;
+                showMessage("Transmitter stopped.");
+            }
+        });
+
+        // --- Receiver Logic ---
+        const playAudioChunk = (base64data) => {
+            const byteString = atob(base64data.split(',')[1]);
+            const mimeType = base64data.split(',')[0].match(/:(.*?);/)[1];
+            const ab = new ArrayBuffer(byteString.length);
+            const ia = new Uint8Array(ab);
+            for (let i = 0; i < byteString.length; i++) {
+                ia[i] = byteString.charCodeAt(i);
+            }
+            const blob = new Blob([ab], { type: mimeType });
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                audioContext.decodeAudioData(reader.result, (buffer) => {
+                    audioQueue.push(buffer);
+                    if (audioQueue.length === 1) {
+                        schedulePlayback();
+                    }
+                });
+            };
+            reader.readAsArrayBuffer(blob);
+        };
+
+        const schedulePlayback = () => {
+            if (audioQueue.length > 0) {
+                const buffer = audioQueue.shift();
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+
+                let now = audioContext.currentTime;
+                if (nextStartTime < now) {
+                    nextStartTime = now;
+                }
+                source.start(nextStartTime);
+                nextStartTime += buffer.duration;
+                source.onended = () => {
+                    schedulePlayback();
+                };
+            }
+        };
+
+        receiveButton.addEventListener('click', () => {
+            if (!db || !userId) {
+                showMessage("Firebase is not ready. Please wait.");
+                return;
+            }
+
+            const streamId = streamIdInput.value.trim();
+            if (!streamId) {
+                showMessage("Please enter a Stream ID.");
+                return;
+            }
+
+            if (!isStreaming) {
+                const streamDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'audio-streams', streamId);
+                onSnapshot(streamDocRef, (docSnap) => {
+                    if (docSnap.exists() && docSnap.data().sender !== userId) {
+                        const data = docSnap.data().data;
+                        if (data) {
+                           playAudioChunk(data);
+                        }
+                    }
+                }, (error) => {
+                    console.error("Error listening to stream:", error);
+                    showMessage("Error receiving audio stream. See console for details.");
+                });
+                isStreaming = true;
+                toggleButtonState(receiveButton, true, "Stop Receiver", "Start Receiver", ['bg-gray-500', 'hover:bg-gray-600', 'text-gray-200'], ['bg-blue-600', 'hover:bg-blue-700', 'text-white']);
+                transmitButton.disabled = true;
+                streamIdInput.disabled = true;
+                showMessage(`Receiving from Stream ID: ${streamId}`);
+            } else {
+                // To stop, we'll need to refresh or add a way to detach the listener.
+                // For this example, simply refresh the page to stop the listener.
+                isStreaming = false;
+                toggleButtonState(receiveButton, false, "Stop Receiver", "Start Receiver", ['bg-gray-500', 'hover:bg-gray-600', 'text-gray-200'], ['bg-blue-600', 'hover:bg-blue-700', 'text-white']);
+                transmitButton.disabled = false;
+                streamIdInput.disabled = false;
+                showMessage("Receiver stopped. To resume, restart the app.");
+            }
+        });
+    </script>
+</body>
+</html>
+
